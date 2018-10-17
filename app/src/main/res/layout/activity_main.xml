@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<android.support.constraint.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".MainActivity">
+
+    <android.support.constraint.Guideline
+        android:id="@+id/guidline"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintGuide_begin="72dp" />
+
+    <Button
+        android:id="@+id/bt_start_hook"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="StartHook"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="@+id/guidline"
+        app:layout_constraintVertical_bias="0.1"/>
+
+    <Button
+        android:id="@+id/bt_stop_hook"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="StopHook"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="@+id/guidline"
+        app:layout_constraintVertical_bias="0.2"/>
+
+    <Button
+        android:id="@+id/bt_encript"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Encript"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="@+id/guidline"
+        app:layout_constraintVertical_bias="0.4"/>
+
+    <Button
+        android:id="@+id/bt_decrypt"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Decrypt"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="@+id/guidline"
+        app:layout_constraintVertical_bias="0.5"/>
+
+    <Button
+        android:id="@+id/bt_read_pdf"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="ReadPdf"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="@+id/guidline"
+        app:layout_constraintVertical_bias="0.7"/>
+
+    <Button
+        android:id="@+id/bt_read_txt"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="ReadTxt"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="@+id/guidline"
+        app:layout_constraintVertical_bias="0.8"/>
+
+    <Button
+        android:id="@+id/bt_lseek"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="LseekTest"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="@+id/guidline"
+        app:layout_constraintVertical_bias="0.9"/>
+
+</android.support.constraint.ConstraintLayout>
