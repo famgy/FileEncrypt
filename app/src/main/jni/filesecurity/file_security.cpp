@@ -70,6 +70,11 @@ static int fileEncrypt(int dirFd, const char *srcPathName)
     if (hSource == NULL) {
         return -1;
     }
+    if (srcPathName == NULL) {
+        __android_log_print(ANDROID_LOG_DEBUG, "inline======", "srcPathName is NULL");
+        return -1;
+    }
+
     int len = strlen(srcPathName);
     char *pathNameTmp = (char *) malloc(len + sizeof("_tmp"));
     if (pathNameTmp == NULL) {
@@ -83,6 +88,7 @@ static int fileEncrypt(int dirFd, const char *srcPathName)
     FILE *hDestination = fdopen(old_openat(dirFd, pathNameTmp, O_CREAT | O_RDWR, 0640), "a+");
     if (hDestination == NULL) {
         fclose(hSource);
+        free(pathNameTmp);
         return -1;
     }
 
@@ -106,6 +112,7 @@ static int fileEncrypt(int dirFd, const char *srcPathName)
     for (int i = 0; i < blockCount; i++) {
         readBufferLen = fread(plaintBuffer, 1, BLOCK_SIZE, hSource);
         if (readBufferLen != BLOCK_SIZE) {
+            free(pathNameTmp);
             return -1;
         }
 
@@ -116,6 +123,7 @@ static int fileEncrypt(int dirFd, const char *srcPathName)
     if (blockExtraLen != 0) {
         readBufferLen = fread(plaintBuffer, 1, blockExtraLen, hSource);
         if (readBufferLen != readBufferLen) {
+            free(pathNameTmp);
             return -1;
         }
         ciphierBufferSize = fileXorEncrypt(plaintBuffer, readBufferLen, cipherBuffer);
@@ -303,15 +311,18 @@ static int __nativehook_impl_android_close(int fd) {
     it = g_FileFdMap.find(fd);
     if (it != g_FileFdMap.end()) {
         __android_log_print(ANDROID_LOG_DEBUG, "inlinehook", "close: fd = %d", fd);
-        result = syscall(SYS_close, fd);
+        result = old_close(fd);
+//        result = syscall(SYS_close, fd);
         if (result == 0) {
             g_FileFdMap.erase(it);
             FILE_FD_INFO_S *fileFdInfoTmp = it->second;
             free(fileFdInfoTmp);
+
+            __android_log_print(ANDROID_LOG_DEBUG, "inlinehook", "finish close: fd = %d", fd);
         }
     } else {
+//        result = syscall(SYS_close, fd);
         result = old_close(fd);
-        //result = syscall(SYS_close, fd);
     }
 
     return result;
@@ -407,159 +418,182 @@ static size_t findDecryptPoint(off_t curOffset, size_t *DecryptPoint) {
     return relativeOffset;
 }
 
-static int bufferEncrypt(int fd, void *buf,size_t count)
-{
-    size_t relativeOffset;
-    size_t decryptPoint;
-    ssize_t r_len;
-    unsigned char plaintBuffer[BLOCK_SIZE];
-    unsigned char cipherBuffer[BLOCK_SIZE];
-    int plaintBufferSize;
-    char *outBuffer = NULL;
-    int outBufferLen = 0;
-    int blockCount;
-    char *bufferPoint = (char *)buf;
 
-    size_t fdCurOffset = old_lseek(fd, 0,SEEK_CUR);
+size_t calculateDecryptBlockCount(size_t decryptPoint, off_t curOffset, size_t count,
+                           size_t fileBlockExtraLenStart, size_t fileBlockExtraLen, size_t *bufferBlockExtraLen) {
+    size_t i;
+    size_t filePoint = 0;
+    size_t blockCount = 0;
 
-    relativeOffset = findEncryptPoint(fdCurOffset, &decryptPoint);
-    if (fdCurOffset != decryptPoint) {
-        blockCount = count / BLOCK_SIZE + 1;
-    } else {
-        blockCount = count / BLOCK_SIZE;
-    }
-
-    outBuffer = (char *)malloc(BLOCK_SIZE * blockCount);
-    if (NULL == outBuffer) {
-        __android_log_print(ANDROID_LOG_DEBUG, "befor==inlinehook=====", "malloc failed");
-        return -1;
-    }
-
-    old_lseek(fd, decryptPoint, SEEK_SET);
-
-    while ((r_len = old_read(fd, cipherBuffer, BLOCK_SIZE)) > 0) {
-        if (r_len == BLOCK_SIZE) {
-            plaintBufferSize = fileSm4Decrypt(cipherBuffer, r_len, plaintBuffer);
-        } else {
-            plaintBufferSize = fileXorDecrypt(cipherBuffer, r_len, plaintBuffer);
-        }
-
-        if (relativeOffset != 0) {
-            if (plaintBufferSize - relativeOffset < count) {
-                memcpy(buf, plaintBuffer + relativeOffset, plaintBufferSize - relativeOffset);
-                outBufferLen = plaintBufferSize - relativeOffset;
+    *bufferBlockExtraLen = 0;
+    for (i = 0; ; i++) {
+        filePoint = decryptPoint + i * BLOCK_SIZE;
+        if (filePoint > fileBlockExtraLenStart) {
+            blockCount = i - 1;
+            *bufferBlockExtraLen = curOffset + count - filePoint;
+            break;
+        } else if (filePoint == fileBlockExtraLenStart) {
+            blockCount = i;
+            size_t extraLen = curOffset + count - filePoint;
+            if (extraLen < fileBlockExtraLen) {
+                *bufferBlockExtraLen = extraLen;
             } else {
-                memcpy(buf, plaintBuffer + relativeOffset, count);
-                outBufferLen = count;
-                break;
+                *bufferBlockExtraLen = fileBlockExtraLen;
             }
 
-            relativeOffset = 0;
-        } else {
-            if (outBufferLen + plaintBufferSize < count) {
-                memcpy(bufferPoint + outBufferLen, plaintBuffer, plaintBufferSize);
-                outBufferLen += plaintBufferSize;
-            } else if (outBufferLen + plaintBufferSize == count){
-                memcpy(bufferPoint + outBufferLen, plaintBuffer, plaintBufferSize);
-                outBufferLen = count;
-                break;
-            } else {
-                memcpy(bufferPoint + outBufferLen, plaintBuffer, count - outBufferLen);
-                outBufferLen = count;
-                break;
-            }
+            break;
         }
 
-        // readed append '`'
-        if (plaintBufferSize != r_len) {
+        if (filePoint >= curOffset + count) {
+            blockCount = i;
             break;
         }
     }
 
-    // recover offset
-    old_lseek(fd, fdCurOffset + outBufferLen, SEEK_SET);
-
-    return outBufferLen;
+    return blockCount;
 }
 
+//static int bufferEncrypt(int fd, void *buf,size_t count)
+//{
+//    size_t relativeOffset;
+//    size_t decryptPoint;
+//    ssize_t r_len;
+//    unsigned char plaintBuffer[BLOCK_SIZE];
+//    unsigned char cipherBuffer[BLOCK_SIZE];
+//    int plaintBufferSize;
+//    char *outBuffer = NULL;
+//    int outBufferLen = 0;
+//    int blockCount;
+//    char *bufferPoint = (char *)buf;
+//
+//    size_t fdCurOffset = old_lseek(fd, 0,SEEK_CUR);
+//
+//    relativeOffset = findEncryptPoint(fdCurOffset, &decryptPoint);
+//    if (fdCurOffset != decryptPoint) {
+//        blockCount = count / BLOCK_SIZE + 1;
+//    } else {
+//        blockCount = count / BLOCK_SIZE;
+//    }
+//
+//    old_lseek(fd, decryptPoint, SEEK_SET);
+//
+//    while ((r_len = old_read(fd, cipherBuffer, BLOCK_SIZE)) > 0) {
+//        if (r_len == BLOCK_SIZE) {
+//            plaintBufferSize = fileSm4Decrypt(cipherBuffer, r_len, plaintBuffer);
+//        } else {
+//            plaintBufferSize = fileXorDecrypt(cipherBuffer, r_len, plaintBuffer);
+//        }
+//
+//        if (relativeOffset != 0) {
+//            if (plaintBufferSize - relativeOffset < count) {
+//                memcpy(buf, plaintBuffer + relativeOffset, plaintBufferSize - relativeOffset);
+//                outBufferLen = plaintBufferSize - relativeOffset;
+//            } else {
+//                memcpy(buf, plaintBuffer + relativeOffset, count);
+//                outBufferLen = count;
+//                break;
+//            }
+//
+//            relativeOffset = 0;
+//        } else {
+//            if (outBufferLen + plaintBufferSize < count) {
+//                memcpy(bufferPoint + outBufferLen, plaintBuffer, plaintBufferSize);
+//                outBufferLen += plaintBufferSize;
+//            } else if (outBufferLen + plaintBufferSize == count){
+//                memcpy(bufferPoint + outBufferLen, plaintBuffer, plaintBufferSize);
+//                outBufferLen = count;
+//                break;
+//            } else {
+//                memcpy(bufferPoint + outBufferLen, plaintBuffer, count - outBufferLen);
+//                outBufferLen = count;
+//                break;
+//            }
+//        }
+//
+//        // readed append '`'
+//        if (plaintBufferSize != r_len) {
+//            break;
+//        }
+//    }
+//
+//    // recover offset
+//    old_lseek(fd, fdCurOffset + outBufferLen, SEEK_SET);
+//
+//    return outBufferLen;
+//}
 
 static int bufferDecrypt(int fd, void *buf,size_t count)
 {
     size_t relativeOffset;
     size_t decryptPoint;
-    ssize_t r_len;
     unsigned char plaintBuffer[BLOCK_SIZE];
     unsigned char cipherBuffer[BLOCK_SIZE];
     int plaintBufferSize;
-    char *outBuffer = NULL;
-    int outBufferLen = 0;
     int bufferBlockCount;
-    char *bufferPoint = (char *)buf;
 
 
     struct stat statbuf;
     size_t fileSize;
     size_t blockCount;
-    size_t blockExtraLen;
-    old_fstat(fd, &statbuf);
-    fileSize = statbuf.st_size;
-    blockCount = fileSize / BLOCK_SIZE;
-    blockExtraLen = fileSize % BLOCK_SIZE;
+    size_t bufferBlockExtraLen = 0;
+    size_t fileBlockExtraLenStart;
+    size_t fileBlockExtraLen = 0;
+    int readBufferLen;
+    int outBufferLen = 0;
+    char *outBuf = (char *)buf;
 
+    old_fstat(fd, &statbuf);
+    fileSize = statbuf.st_size - SUNINFO;
+    blockCount = fileSize / BLOCK_SIZE;
+    fileBlockExtraLenStart = SUNINFO + (blockCount * BLOCK_SIZE);
+    fileBlockExtraLen = fileSize % BLOCK_SIZE;
 
     size_t fdCurOffset = old_lseek(fd, 0,SEEK_CUR);
+    if (fdCurOffset >= fileBlockExtraLenStart) {
+        readBufferLen = old_read(fd, cipherBuffer, count);
+        if (readBufferLen < 0) {
+            return -1;
+        } else if (readBufferLen == 0) {
+            return 0;
+        }
 
-    relativeOffset = findDecryptPoint(fdCurOffset, &decryptPoint);
-    if (fdCurOffset != decryptPoint) {
-        bufferBlockCount = count / BLOCK_SIZE + 1;
+        plaintBufferSize = fileXorDecrypt(cipherBuffer, readBufferLen, plaintBuffer);
+        memcpy(outBuf, plaintBuffer, plaintBufferSize);
+        outBufferLen = outBufferLen + plaintBufferSize;
     } else {
-        bufferBlockCount = count / BLOCK_SIZE;
-    }
+        relativeOffset = findDecryptPoint(fdCurOffset, &decryptPoint);
+        bufferBlockCount = calculateDecryptBlockCount(decryptPoint, fdCurOffset, count, fileBlockExtraLenStart, fileBlockExtraLen, &bufferBlockExtraLen);
 
-    outBuffer = (char *)malloc(BLOCK_SIZE * bufferBlockCount);
-    if (NULL == outBuffer) {
-        __android_log_print(ANDROID_LOG_DEBUG, "befor==inlinehook=====", "malloc failed");
-        return -1;
-    }
 
-    old_lseek(fd, decryptPoint, SEEK_SET);
+        // set offset decryptPoint
+        old_lseek(fd, decryptPoint, SEEK_SET);
 
-    while ((r_len = old_read(fd, cipherBuffer, BLOCK_SIZE)) > 0) {
-        if (r_len == BLOCK_SIZE) {
-            plaintBufferSize = fileSm4Decrypt(cipherBuffer, r_len, plaintBuffer);
-        } else {
-            plaintBufferSize = fileXorDecrypt(cipherBuffer, r_len, plaintBuffer);
-        }
-
-        if (relativeOffset != 0) {
-            if (plaintBufferSize - relativeOffset < count) {
-                memcpy(buf, plaintBuffer + relativeOffset, plaintBufferSize - relativeOffset);
-                outBufferLen = plaintBufferSize - relativeOffset;
-            } else {
-                memcpy(buf, plaintBuffer + relativeOffset, count);
-                outBufferLen = count;
-                break;
+        //read encrypt body
+        for (int i = 0; i < bufferBlockCount; i++) {
+            readBufferLen = old_read(fd, cipherBuffer, BLOCK_SIZE);
+            if (readBufferLen != BLOCK_SIZE) {
+                return -1;
             }
+            plaintBufferSize = fileSm4Decrypt(cipherBuffer, readBufferLen, plaintBuffer);
 
-            relativeOffset = 0;
-        } else {
-            if (outBufferLen + plaintBufferSize < count) {
-                memcpy(bufferPoint + outBufferLen, plaintBuffer, plaintBufferSize);
-                outBufferLen += plaintBufferSize;
-            } else if (outBufferLen + plaintBufferSize == count){
-                memcpy(bufferPoint + outBufferLen, plaintBuffer, plaintBufferSize);
-                outBufferLen = count;
-                break;
+            if (relativeOffset != 0) {
+                memcpy(outBuf + outBufferLen, plaintBuffer + relativeOffset, plaintBufferSize - relativeOffset);
+                outBufferLen = outBufferLen + (plaintBufferSize - relativeOffset);
+                relativeOffset = 0;
             } else {
-                memcpy(bufferPoint + outBufferLen, plaintBuffer, count - outBufferLen);
-                outBufferLen = count;
-                break;
+                memcpy(outBuf + outBufferLen, plaintBuffer, plaintBufferSize);
+                outBufferLen = outBufferLen + plaintBufferSize;
             }
         }
 
-        // readed append '`'
-        if (plaintBufferSize != r_len) {
-            break;
+        if (bufferBlockExtraLen != 0) {
+            readBufferLen = old_read(fd, cipherBuffer, bufferBlockExtraLen);
+            if (readBufferLen != bufferBlockExtraLen) {
+                return -1;
+            }
+            plaintBufferSize = fileXorDecrypt(cipherBuffer, readBufferLen, plaintBuffer);
+            memcpy(outBuf + outBufferLen, plaintBuffer, plaintBufferSize);
+            outBufferLen = outBufferLen + plaintBufferSize;
         }
     }
 
@@ -581,12 +615,14 @@ static ssize_t __nativehook_impl_android_read(int fd, void *buf, size_t count) {
 
         r_len = bufferDecrypt(fd, buf, count);
 
-        __android_log_print(ANDROID_LOG_DEBUG, "after==inlinehook=====", "read: buffer = %x, %x\n",
-                            ((char *) buf)[0], ((char *) buf)[1]);
+        if (r_len > 0) {
+            __android_log_print(ANDROID_LOG_DEBUG, "after==inlinehook=====", "read: buffer = %x, %x\n",
+                                ((char *) buf)[0], ((char *) buf)[1]);
 
-        size_t curOffset = (int) old_lseek(fd, 0, SEEK_CUR);
-        __android_log_print(ANDROID_LOG_DEBUG, "finish==inlinehook=====", "read: buffer = %x, %x, %x, %x\n", ((char *) buf)[curOffset-3], ((char *) buf)[curOffset-2],
-                            ((char *) buf)[curOffset-1], ((char *) buf)[curOffset]);
+            size_t curOffset = (int) old_lseek(fd, 0, SEEK_CUR);
+            __android_log_print(ANDROID_LOG_DEBUG, "finish==inlinehook=====", "read: buffer = %x, %x, %x, %x\n", ((char *) buf)[curOffset-3], ((char *) buf)[curOffset-2],
+                                ((char *) buf)[curOffset-1], ((char *) buf)[curOffset]);
+        }
     } else {
         r_len = old_read(fd, buf, count);
     }
@@ -594,36 +630,71 @@ static ssize_t __nativehook_impl_android_read(int fd, void *buf, size_t count) {
     return r_len;
 }
 
-//static ssize_t __nativehook_impl_android_read(int fd, void *buf, size_t count) {
-//    //__android_log_print(ANDROID_LOG_DEBUG, "inlinehook", "pread: fd = %d, count = %d, offset = %d\n", count);
-//
-//    ssize_t r_len;
-//
-//    if (NULL != findFileFdInfo(fd)) {
-//        __android_log_print(ANDROID_LOG_DEBUG, "\ninlinehook=====",
-//                            "init , read: fd = %d, count = %d, curOffset = %d\n", fd, count,
-//                            (int) old_lseek(fd, 0, SEEK_CUR));
-//
-//        r_len = old_read(fd, buf, count);
-//
-////        char *tmp = (char *)buf;
-////        for (int i = 0; i < r_len; i++) {
-////            tmp[i] = tmp[i] ^ 'f';
-////        }
-//
-//        __android_log_print(ANDROID_LOG_DEBUG, "after==inlinehook=====", "read: buffer = %x, %x\n",
-//                            ((char *) buf)[0], ((char *) buf)[1]);
-//
-//
-//        size_t curOffset = (int) old_lseek(fd, 0, SEEK_CUR);
-//        __android_log_print(ANDROID_LOG_DEBUG, "finish==inlinehook=====", "read: buffer = %x, %x, %x, %x\n", ((char *) buf)[curOffset-3], ((char *) buf)[curOffset-2],
-//                            ((char *) buf)[curOffset-1], ((char *) buf)[curOffset]);
-//    } else {
-//        r_len = old_read(fd, buf, count);
-//    }
-//
-//    return r_len;
-//}
+size_t calculateEncryptBlockCount(size_t count, size_t *fileBlockExtraLenStart, size_t *bufferBlockExtraLen) {
+    size_t blockCount = 0;
+
+    blockCount = count / BLOCK_SIZE;
+    *fileBlockExtraLenStart = SUNINFO + (blockCount * BLOCK_SIZE);
+    *bufferBlockExtraLen = count % BLOCK_SIZE;
+
+    return blockCount;
+}
+
+static int bufferEncrypt(int fd, const void *buf,size_t count)
+{
+    size_t relativeOffset;
+    size_t decryptPoint;
+    unsigned char plaintBuffer[BLOCK_SIZE];
+    unsigned char cipherBuffer[BLOCK_SIZE];
+    int plaintBufferSize;
+    int cipherBufferSize;
+    int bufferBlockCount;
+
+
+    struct stat statbuf;
+    size_t fileSize;
+    size_t blockCount;
+    size_t bufferBlockExtraLen = 0;
+    size_t fileBlockExtraLenStart;
+    size_t fileBlockExtraLen = 0;
+    int readBufferLen;
+    int outBufferLen = 0;
+    unsigned char *outBuf = (unsigned char *)buf;
+
+    old_fstat(fd, &statbuf);
+    fileSize = statbuf.st_size - SUNINFO;
+    blockCount = fileSize / BLOCK_SIZE;
+    fileBlockExtraLenStart = SUNINFO + (blockCount * BLOCK_SIZE);
+    fileBlockExtraLen = fileSize % BLOCK_SIZE;
+
+    size_t fdCurOffset = old_lseek(fd, 0,SEEK_CUR);
+    if (fdCurOffset == fileBlockExtraLenStart) {
+        bufferBlockCount = calculateEncryptBlockCount(count, &fileBlockExtraLenStart, &bufferBlockExtraLen);
+
+        //write encrypt body
+        for (int i = 0; i < bufferBlockCount; i++) {
+            cipherBufferSize = fileSm4Decrypt(outBuf + (i * bufferBlockCount), BLOCK_SIZE, cipherBuffer);
+            if (cipherBufferSize != BLOCK_SIZE) {
+                return -1;
+            }
+
+            old_write(fd, cipherBuffer, cipherBufferSize);
+            outBufferLen = outBufferLen + cipherBufferSize;
+        }
+
+        if (bufferBlockExtraLen != 0) {
+            cipherBufferSize = fileSm4Decrypt(outBuf + fileBlockExtraLenStart, bufferBlockExtraLen, cipherBuffer);
+            if (cipherBufferSize != bufferBlockExtraLen) {
+                return -1;
+            }
+
+            old_write(fd, cipherBuffer, cipherBufferSize);
+            outBufferLen = outBufferLen + cipherBufferSize;
+        }
+    }
+
+    return outBufferLen;
+}
 
 static ssize_t __nativehook_impl_android_write(int fd, const void *buf, size_t count) {
     ssize_t r_len;
@@ -637,20 +708,7 @@ static ssize_t __nativehook_impl_android_write(int fd, const void *buf, size_t c
             old_write(fd, "suninfo", SUNINFO);
         }
 
-        char *bufTmp = (char *)malloc(count);
-        if (bufTmp == NULL) {
-            return -1;
-        }
-        memcpy(bufTmp, buf, count);
-
-        char *tmp = (char *)bufTmp;
-        for (int i = 0; i < count; i++) {
-            tmp[i] = tmp[i] ^ 'f';
-        }
-
-        r_len = old_write(fd, bufTmp, count);
-
-        free(bufTmp);
+        r_len = bufferEncrypt(fd, buf, count);
 
         return r_len;
     }
@@ -739,7 +797,11 @@ static int __nativehook_impl_android_fstat(int fd, struct stat *statbuf) {
     if (NULL != pstFileFdInfo) {
         __android_log_print(ANDROID_LOG_DEBUG, "inlinehook=====",
                             "before, fstat: fd = %d, fileSize = %lu, \n", fd, statbuf->st_size);
-        statbuf->st_size = statbuf->st_size - SUNINFO;
+
+        if (statbuf->st_size != 0) {
+            statbuf->st_size = statbuf->st_size - SUNINFO;
+        }
+
         __android_log_print(ANDROID_LOG_DEBUG, "inlinehook=====",
                             "after, fstat: fd = %d, fileSize = %lu, \n", fd, statbuf->st_size);
     }
