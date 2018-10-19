@@ -52,7 +52,7 @@ public class MainActivity extends AppCompatActivity {
                 bt_start_hook.setBackgroundColor(Color.DKGRAY);
 
                 //ElfHookMain.startHook(getApplicationContext());
-                //startInlineHook();
+//                startInlineHook();
 
                 //load and run the target lib
                 FileSecurity.getInstance().init(getApplicationContext());

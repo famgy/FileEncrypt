@@ -24,6 +24,8 @@ typedef struct tagFileFdInfo
     int flag;
 }FILE_FD_INFO_S;
 
+#define SUNINFO 7
+
 const char* inline_baseApk = NULL;
 int inline_baseApkL = 0;
 
@@ -40,6 +42,7 @@ extern "C" {
     ssize_t (*old_read)(int fd, void *buf, size_t count) = NULL;
     ssize_t (*old_write)(int fd, const void *buf, size_t count) = NULL;
     off_t (*old_lseek)(int fd, off_t offset, int whence) = NULL;
+    int (*old_fstat)(int fd, struct stat *statbuf) = NULL;
 
     int (*old_close)(int fd) = NULL;
 
@@ -83,9 +86,9 @@ extern "C" {
             }
 
             char famgyBuffer[6] = {0};
-            fread(famgyBuffer, 5, 1, hSource);
+            fread(famgyBuffer, SUNINFO, 1, hSource);
             fseek(hSource, 0, SEEK_SET);
-            if (strcmp(famgyBuffer, "famgy") == 0) {
+            if (strcmp(famgyBuffer, "suninfo") == 0) {
                 fclose(hSource);
 
                 int fdTmp = old_openat(dirFd, pathName, flag, mode);
@@ -100,7 +103,7 @@ extern "C" {
                     pstFileFdInfo->flag = flag;
                     g_FileFdMap.insert(std::pair<int, FILE_FD_INFO_S *>(fdTmp, pstFileFdInfo));
 
-                    lseek(fdTmp, 5, SEEK_SET);
+                    lseek(fdTmp, SUNINFO, SEEK_SET);
                 }
 
                 return fdTmp;
@@ -122,7 +125,7 @@ extern "C" {
                 return -1;
             }
 
-            fwrite("famgy", 5, 1, hDestination);
+            fwrite("suninfo", SUNINFO, 1, hDestination);
             char buffer[1] = {0};
             while(fread(buffer, 1, 1, hSource) > 0) {
                 buffer[0] = buffer[0] ^ 'f';
@@ -152,7 +155,7 @@ extern "C" {
             pstFileFdInfo->flag = flag;
             g_FileFdMap.insert(std::pair<int, FILE_FD_INFO_S *>(fd, pstFileFdInfo));
 
-            lseek(fd, 5, SEEK_SET);
+            lseek(fd, SUNINFO, SEEK_SET);
         }
 
         return fd;
@@ -178,6 +181,27 @@ extern "C" {
         return result;
     }
 
+    static int __nativehook_impl_android_fstat(int fd, struct stat *statbuf) {
+        int result = 0;
+
+        result = old_fstat(fd, statbuf);
+
+        FILE_FD_INFO_S *pstFileFdInfo = findFileFdInfo(fd);
+        if (NULL != pstFileFdInfo) {
+            __android_log_print(ANDROID_LOG_DEBUG, "inlinehook=====",
+                                "before, fstat: fd = %d, fileSize = %lu, \n", fd, statbuf->st_size);
+
+            if (statbuf->st_size != 0) {
+                statbuf->st_size = statbuf->st_size - SUNINFO;
+            }
+
+            __android_log_print(ANDROID_LOG_DEBUG, "inlinehook=====",
+                                "after, fstat: fd = %d, fileSize = %lu, \n", fd, statbuf->st_size);
+        }
+
+        return result;
+    }
+
     static ssize_t __nativehook_impl_android_pread(int fd, void *buf, size_t count, off_t offset) {
         //__android_log_print(ANDROID_LOG_DEBUG, "inlinehook", "pread: fd = %d, count = %d, offset = %d\n", fd, count, offset);
 
@@ -186,16 +210,20 @@ extern "C" {
         if (NULL != findFileFdInfo(fd)) {
             __android_log_print(ANDROID_LOG_DEBUG, "inlinehook=====", "pread: fd = %d, count = %d, offset = %d\n", fd, count, offset);
 
-            r_len = old_pread(fd, buf, count, offset + 5);
+            r_len = old_pread(fd, buf, count, offset + SUNINFO);
             if (r_len == -1) {
                 __android_log_print(ANDROID_LOG_DEBUG, "inlinehook=====", "pread failed: fd = %d, count = %d, offset = %d, errno = %s\n", fd, count, offset, strerror(errno));
                 return -1;
             }
 
+            __android_log_print(ANDROID_LOG_DEBUG, "before==inlinehook=====", "pread: buffer = %x, %x\n", ((char *) buf)[0], ((char *) buf)[1]);
+
             char *tmp = (char *)buf;
             for (int i = 0; i < r_len; i++) {
                 tmp[i] = tmp[i] ^ 'f';
             }
+
+            __android_log_print(ANDROID_LOG_DEBUG, "after==inlinehook=====", "r_len = %ld, pread: buffer = %x, %x\n", r_len, ((char *) buf)[0], ((char *) buf)[1]);
         } else {
             r_len = old_pread(fd, buf, count, offset);
         }
@@ -220,7 +248,7 @@ extern "C" {
                 tmp[i] = tmp[i] ^ 'f';
             }
 
-            r_len = old_pwrite(fd, bufTmp, count, offset + 5);
+            r_len = old_pwrite(fd, bufTmp, count, offset + SUNINFO);
 
             free(bufTmp);
         } else {
@@ -263,9 +291,9 @@ extern "C" {
         if (NULL != pstFileFdInfo) {
             __android_log_print(ANDROID_LOG_DEBUG, "inlinehook=====", "write: fd = %d, count = %d\n", fd, count);
 
-            if ((pstFileFdInfo->flag & O_TRUNC != 0) && (lseek(fd, 0, SEEK_CUR) == 5)) {
+            if ((pstFileFdInfo->flag & O_TRUNC != 0) && (lseek(fd, 0, SEEK_CUR) == SUNINFO)) {
                 lseek(fd, 0, SEEK_SET);
-                old_write(fd, "famgy", 5);
+                old_write(fd, "suninfo", SUNINFO);
             }
 
             char *bufTmp = (char *)malloc(count);
@@ -301,6 +329,7 @@ extern "C" {
 
         return old_lseek(fd, offset, whence);
     }
+
 
     JNIEXPORT void Java_com_famgy_fileencrypt_MainActivity_startInlineHook(JNIEnv *env, jobject obj) {
         void *pOpenat = (void *) __openat;
@@ -381,6 +410,16 @@ extern "C" {
             inlineHook((uint32_t) lseek);
             __android_log_print(ANDROID_LOG_DEBUG, "inlinehook", "inline hook ==lseek== end\n");
         }
+
+        //fstat
+        if (registerInlineHook((uint32_t) fstat, (uint32_t) __nativehook_impl_android_fstat,
+                               (uint32_t **) &old_fstat) != ELE7EN_OK) { ;
+        } else {
+            __android_log_print(ANDROID_LOG_DEBUG, "inlinehook", "inline hook ==fstat== start %p\n",
+                                fstat);
+            inlineHook((uint32_t) fstat);
+            __android_log_print(ANDROID_LOG_DEBUG, "inlinehook", "inline hook ==fstat== end\n");
+        }
     }
 
     JNIEXPORT void Java_com_famgy_fileencrypt_MainActivity_startInlineLseek(JNIEnv *env, jobject obj) {
@@ -392,7 +431,7 @@ extern "C" {
 
         __android_log_print(ANDROID_LOG_DEBUG, "inlinehook", "inline hook ==lseek== before - curOffset = %d, fd = %d\n", lseek(fd, 0, SEEK_CUR), fd);
 
-        lseek(fd, 5, SEEK_SET);
+        lseek(fd, SUNINFO, SEEK_SET);
 
         __android_log_print(ANDROID_LOG_DEBUG, "inlinehook", "inline hook ==lseek== after -  curOffset = %d\n", lseek(fd, 0, SEEK_CUR));
     }
