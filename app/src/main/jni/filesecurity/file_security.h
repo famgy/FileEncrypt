@@ -13,6 +13,7 @@ typedef struct tagFileFdInfo
 {
     int fd;
     int flag;
+    char szFilePath[2048];
 }FILE_FD_INFO_S;
 
 #define FILE_SECURITY_EXPORT __attribute__((visibility("default")))
