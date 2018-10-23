@@ -12,6 +12,7 @@ extern "C" {
 typedef struct tagFileFdInfo
 {
     int fd;
+    int dirFd;
     int flag;
     char szFilePath[2048];
 }FILE_FD_INFO_S;
