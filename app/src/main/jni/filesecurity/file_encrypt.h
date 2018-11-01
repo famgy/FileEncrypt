@@ -8,8 +8,8 @@
 #include <cstdio>
 
 
-extern size_t fileSm4Encrypt(unsigned char *plaintext, size_t plaintextSize, unsigned char *ciphertext);
-extern size_t fileSm4Decrypt(unsigned char * ciphertext, size_t ciphertextSize, unsigned char *plaintext);
+extern size_t fileSm4Encrypt(unsigned char *plaintext, size_t plaintextSize, unsigned char *ciphertext, char *secretKey, char *secretIvec);
+extern size_t fileSm4Decrypt(unsigned char * ciphertext, size_t ciphertextSize, unsigned char *plaintext, char *secretKey, char *secretIvec);
 extern size_t fileXorEncrypt(unsigned char *plaintext, size_t plaintextSize, unsigned char *ciphertext);
 extern size_t fileXorDecrypt(unsigned char *plaintext, size_t plaintextSize, unsigned char *ciphertext);
 

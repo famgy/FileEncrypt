@@ -8,25 +8,25 @@
 #include "file_encrypt.h"
 #include "../crypto/sm4.h"
 
-void sm4Encrypt(unsigned char input[], size_t inputSize, unsigned char output[]) {
+void sm4Encrypt(unsigned char input[], size_t inputSize, unsigned char output[], char *secretKey, char *secretIvec) {
     uint8_t ivec[16];
     uint8_t key[16];
     sm4_context sm4Context;
 
-    memset(key, 0x88, 16);
-    memset(ivec, 0x99, 16);
+    memcpy(key, secretKey, 16);
+    memcpy(ivec, secretIvec, 16);
 
     sm4_setkey_enc(&sm4Context, key);
     sm4_crypt_cbc(&sm4Context, SM4_ENCRYPT, inputSize, ivec, input, output);
 }
 
-void sm4Decrypt(unsigned char input[], size_t inputSize, unsigned char output[]) {
+void sm4Decrypt(unsigned char input[], size_t inputSize, unsigned char output[], char *secretKey, char *secretIvec) {
     uint8_t ivec[16];
     uint8_t key[16];
     sm4_context sm4Context;
 
-    memset(key, 0x88, 16);
-    memset(ivec, 0x99, 16);
+    memcpy(key, secretKey, 16);
+    memcpy(ivec, secretIvec, 16);
 
     sm4_setkey_dec(&sm4Context, key);
     sm4_crypt_cbc(&sm4Context, SM4_DECRYPT, inputSize, ivec, input, output);
@@ -39,10 +39,10 @@ void sm4Decrypt(unsigned char input[], size_t inputSize, unsigned char output[])
  * If hexadecimal is true, you will get hexadecimal type cipher text. It is good for displaying on screen.
  * If hexadecimal is false, you will get non-hexadecimal type cipher text.
  */
-size_t fileSm4Encrypt(unsigned char *plaintext, size_t plaintextSize, unsigned char *ciphertext) {
+size_t fileSm4Encrypt(unsigned char *plaintext, size_t plaintextSize, unsigned char *ciphertext, char *secretKey, char *secretIvec) {
 
     //execute sm4-cbc encrypt operation on plain text which is already appended
-    sm4Encrypt(plaintext, plaintextSize, ciphertext);
+    sm4Encrypt(plaintext, plaintextSize, ciphertext, secretKey, secretIvec);
 
     return plaintextSize;
 }
@@ -54,7 +54,7 @@ size_t fileSm4Encrypt(unsigned char *plaintext, size_t plaintextSize, unsigned c
  * Decrypt cipher text.
  * return plain text.
  */
-size_t fileSm4Decrypt(unsigned char * ciphertext, size_t ciphertextSize, unsigned char *plaintext) {
+size_t fileSm4Decrypt(unsigned char * ciphertext, size_t ciphertextSize, unsigned char *plaintext, char *secretKey, char *secretIvec) {
 
     //check parameters
     if (ciphertext == NULL) {
@@ -73,7 +73,7 @@ size_t fileSm4Decrypt(unsigned char * ciphertext, size_t ciphertextSize, unsigne
     }
 
     //execute sm4-cbc decrypt operation
-    sm4Decrypt((unsigned char*)ciphertext, ciphertextSize, plaintext);
+    sm4Decrypt((unsigned char*)ciphertext, ciphertextSize, plaintext, secretKey, secretIvec);
 
     return ciphertextSize;
 }

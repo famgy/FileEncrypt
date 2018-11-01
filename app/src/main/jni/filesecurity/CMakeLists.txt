@@ -6,6 +6,7 @@ add_library( # Sets the name of the library.
              SHARED
 
              # Provides a relative path to your source file(s).
+             file_log.cpp
              file_security.cpp
              file_encrypt.cpp
              fs_jni.cpp )
