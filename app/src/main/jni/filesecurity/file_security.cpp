@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <regex.h>
 #include <sys/mman.h>
+#include <cstdlib>
 
 #include "../hook/inlinehook/inlineHook.h"
 
@@ -37,6 +38,9 @@ extern JavaVM * inline_android_vm;
 std::map<int, FILE_FD_INFO_S *> g_FileFdMap;
 
 #define BLOCK_SIZE 64
+#define FILE_HEADER_TAG "FHT"
+#define SDK_VERSION "1.0"
+#define VERIFY_USER_KEY "88888888"
 
 int (*old_openat)(int, const char *, int, int) = NULL;
 int (*old_fstat)(int fd, struct stat *statbuf) = NULL;
@@ -57,8 +61,6 @@ off64_t (*old_lseek64)(int fd, off64_t offset, int whence) = NULL;
 
 int (*old_close)(int fd) = NULL;
 
-FILE_HEADER_INFO_S g_stFileHeaderInfo;
-
 
 void testBreak(int va_whence, int tmp_whence) {
 /*    int a = 1;
@@ -74,22 +76,59 @@ void testBreak(int va_whence, int tmp_whence) {
 }
 
 //Write encrypt head
-static void addFileHeader(int fd) {
-    old_lseek(fd, 0, SEEK_SET);
-    int wLen = old_write(fd, &g_stFileHeaderInfo, FS_HEADER_LEN);
-    if (wLen != FS_HEADER_LEN) {
-        log_print(ANDROID_LOG_DEBUG, "inline======", "old_write fileHeader failed : %s", strerror(errno));
+static void addFileHeader(int fd, FILE_HEADER_INFO_S *pstFileHeaderInfo) {
+    if (pstFileHeaderInfo == NULL) {
+        log_print(ANDROID_LOG_DEBUG, "inline======", "addFileHeader failed : %s", "pstFileHeaderInfo == NULL");
         return;
     }
 
+    if (pstFileHeaderInfo->szFileHeaderTag[0] == '\0') {
+        FILE_HEADER_INFO_S stFileHeaderInfo;
+        memset(&stFileHeaderInfo, 0, sizeof(FILE_HEADER_INFO_S));
 
-    log_print(ANDROID_LOG_DEBUG, "inline======", "old_write fileHeader successful : FileHeaderTag = %s, version = %s",
-              g_stFileHeaderInfo.szFileHeaderTag, g_stFileHeaderInfo.szSdkVersion);
+        strcpy(stFileHeaderInfo.szFileHeaderTag, FILE_HEADER_TAG);
+        strcpy(stFileHeaderInfo.szSdkVersion, SDK_VERSION);
+        strcpy(stFileHeaderInfo.szVerifyUserKey, VERIFY_USER_KEY);
+
+        srand((int)time(NULL));
+        int randNum = rand();
+
+        char szAppend[12];
+        memset(szAppend, 0x88, 12);
+
+        char szSecretKeys[32] = {0};
+        memcpy(szSecretKeys, stFileHeaderInfo.szFileHeaderTag, 8);
+        memcpy(szSecretKeys + 8, stFileHeaderInfo.szSdkVersion, 8);
+        memcpy(szSecretKeys + 16, &randNum , sizeof(int));
+        memcpy(szSecretKeys + 20, szAppend, 12);
+        for (int i = 0; i < 32; i++) {
+            szSecretKeys[i] = szSecretKeys[i] ^ 'f';
+        }
+
+        char *pcSecretKeysTmp = szSecretKeys;
+        memcpy(stFileHeaderInfo.stSecretKeys.szSecretKey, pcSecretKeysTmp, 16);
+        memcpy(stFileHeaderInfo.stSecretKeys.szSecretIvec, pcSecretKeysTmp + 16, 16);
+
+        memcpy(pstFileHeaderInfo, &stFileHeaderInfo, sizeof(FILE_HEADER_INFO_S));
+        log_print(ANDROID_LOG_DEBUG, "inline======", "addFileHeader : %s", "FileHeaderInfo update");
+    }
+
+
+
+    old_lseek(fd, 0, SEEK_SET);
+    int wLen = old_write(fd, pstFileHeaderInfo, FS_HEADER_LEN);
+    if (wLen != FS_HEADER_LEN) {
+        log_print(ANDROID_LOG_DEBUG, "inline======", "addFileHeader failed : %s", strerror(errno));
+        return;
+    }
+    log_print(ANDROID_LOG_DEBUG, "inline======", "addFileHeader successful : FileHeaderTag = %s, version = %s",
+              pstFileHeaderInfo->szFileHeaderTag, pstFileHeaderInfo->szSdkVersion);
+
 
     return;
 }
 
-static int fileEncrypt(int dirFd, const char *srcPathName)
+static int fileEncrypt(int dirFd, const char *srcPathName, FILE_HEADER_INFO_S *pstFileHeaderInfo)
 {
     log_print(ANDROID_LOG_INFO, "inlinehook==fileEncrypt===", "init , open: fileName = %s", srcPathName);
 
@@ -110,27 +149,28 @@ static int fileEncrypt(int dirFd, const char *srcPathName)
     }
 
     //Write encrypt head
-    addFileHeader(fd_d);
+    addFileHeader(fd_d, pstFileHeaderInfo);
 
     //Write encrypt body
     unsigned char plaintBuffer[BLOCK_SIZE]={0};
     unsigned char cipherBuffer[BLOCK_SIZE]={0};
     int readBufferLen;
-    int ciphierBufferSize;
+    int cipherBufferSize;
 
     while ((readBufferLen = old_read(fd_s, plaintBuffer, BLOCK_SIZE)) > 0) {
         if (readBufferLen == BLOCK_SIZE) {
-            ciphierBufferSize = fileSm4Encrypt(plaintBuffer, readBufferLen, cipherBuffer, g_stFileHeaderInfo.stSecretKeys.szSecretKey, g_stFileHeaderInfo.stSecretKeys.szSecretIvec);
+            cipherBufferSize = fileSm4Encrypt(plaintBuffer, readBufferLen, cipherBuffer, pstFileHeaderInfo->stSecretKeys.szSecretKey, pstFileHeaderInfo->stSecretKeys.szSecretIvec);
             log_print(ANDROID_LOG_DEBUG, "===init==", "readlen = %d",readBufferLen);
         } else if (readBufferLen < BLOCK_SIZE) {
             log_print(ANDROID_LOG_DEBUG, "===init==", "readlen = %d",readBufferLen);
             log_print(ANDROID_LOG_DEBUG, "====before==", "read: buffer = %x, %x, len = %d", ((char *) plaintBuffer)[0], ((char *) plaintBuffer)[1], readBufferLen);
 
-            ciphierBufferSize = fileXorEncrypt(plaintBuffer, readBufferLen, cipherBuffer);
+            cipherBufferSize = fileXorEncrypt(plaintBuffer, readBufferLen, cipherBuffer);
 
             log_print(ANDROID_LOG_DEBUG, "====after==", "read: buffer = %x, %x", ((char *) cipherBuffer)[0], ((char *) cipherBuffer)[1]);
         }
-        old_write(fd_d, cipherBuffer, ciphierBufferSize);
+
+        old_write(fd_d, cipherBuffer, cipherBufferSize);
     }
 
     old_close(fd_s);
@@ -212,7 +252,24 @@ static bool regMatchFileType(const char *pathName)
     return result;
 }
 
+static void parseHeaderInfo(char *pcHeaderBuffer, FILE_HEADER_INFO_S *pstFileHeaderInfo) {
+    memset(pstFileHeaderInfo, 0, sizeof(FILE_HEADER_INFO_S));
+    memcpy(pstFileHeaderInfo->szFileHeaderTag, pcHeaderBuffer, 8);
+    memcpy(pstFileHeaderInfo->szSdkVersion, pcHeaderBuffer + 8, 8);
+    memcpy(pstFileHeaderInfo->szVerifyUserKey, pcHeaderBuffer + 16, 16);
+
+    log_print(ANDROID_LOG_DEBUG, "==inlinehook=====", "parse FileHeaderTag successfull, HeaderTag = %s, SdkVersion = %s, VerifyUserKey = %s",
+              pstFileHeaderInfo->szFileHeaderTag, pstFileHeaderInfo->szSdkVersion, pstFileHeaderInfo->szVerifyUserKey);
+
+
+    memcpy(pstFileHeaderInfo->stSecretKeys.szSecretKey, pcHeaderBuffer + 32, 16);
+    memcpy(pstFileHeaderInfo->stSecretKeys.szSecretIvec, pcHeaderBuffer + 48, 16);
+
+    return;
+}
+
 static int __nativehook_impl_android_openat(int dirFd, const char *pathName, int flag, int mode) {
+    FILE_HEADER_INFO_S stFileHeaderInfo;
 
     // 破解防打包
 //    int lo = strlen(pathName);
@@ -262,15 +319,24 @@ static int __nativehook_impl_android_openat(int dirFd, const char *pathName, int
         if (fd_o == -1) {
             return -1;
         }
-        FILE_HEADER_INFO_S stFileHeaderInfo;
-        memset(&stFileHeaderInfo, 0, sizeof(FILE_HEADER_INFO_S));
-        int readHeadLen = old_read(fd_o, &stFileHeaderInfo, FS_HEADER_LEN);
-        if (readHeadLen < FS_HEADER_LEN) {
-            log_print(ANDROID_LOG_DEBUG, "==inlinehook=====", "read %d: FileHeaderTag failed", fd_o);
-        }
+
+        char headerBuffer[FS_HEADER_LEN] = {0};
+
+
+        int readHeadLen = old_read(fd_o, headerBuffer, FS_HEADER_LEN);
         old_close(fd_o);
 
-        if (memcmp(&stFileHeaderInfo, &g_stFileHeaderInfo, FS_HEADER_LEN) == 0) {
+        if (readHeadLen < FS_HEADER_LEN) {
+            log_print(ANDROID_LOG_DEBUG, "==inlinehook=====", "read %d: FileHeaderTag failed", fd_o);
+        } else {
+            memset(&stFileHeaderInfo, 0, sizeof(FILE_HEADER_INFO_S));
+            parseHeaderInfo(headerBuffer, &stFileHeaderInfo);
+        }
+
+        if (0 == strcmp(stFileHeaderInfo.szFileHeaderTag, FILE_HEADER_TAG) &&
+            0 == strcmp(stFileHeaderInfo.szSdkVersion, SDK_VERSION) &&
+            0 == strcmp(stFileHeaderInfo.szVerifyUserKey, VERIFY_USER_KEY))
+        {
             int fdTmp = old_openat(dirFd, pathName, flag, mode);
             if (fdTmp != -1) {
                 // Add file-fd-list for matching.
@@ -284,6 +350,7 @@ static int __nativehook_impl_android_openat(int dirFd, const char *pathName, int
                 pstFileFdInfo->dirFd = dirFd;
                 pstFileFdInfo->flag = flag;
                 strcpy(pstFileFdInfo->szFilePath, pathName);
+                memcpy(&pstFileFdInfo->stFileHeaderInfo, &stFileHeaderInfo, sizeof(FILE_HEADER_INFO_S));
                 g_FileFdMap.insert(std::pair<int, FILE_FD_INFO_S *>(fdTmp, pstFileFdInfo));
 
                 if (flag & O_TRUNC) {
@@ -295,7 +362,7 @@ static int __nativehook_impl_android_openat(int dirFd, const char *pathName, int
                         return -1;
                     }
 
-                    addFileHeader(fd_g);
+                    addFileHeader(fd_g, &pstFileFdInfo->stFileHeaderInfo);
                     old_close(fd_g);
                 }
 
@@ -305,13 +372,15 @@ static int __nativehook_impl_android_openat(int dirFd, const char *pathName, int
 
             return fdTmp;
         }
-
-        //File encrypt
-        if (fileEncrypt(dirFd, pathName) != 0) {
-            log_print(ANDROID_LOG_INFO, "inlinehook=====", "file : %s, encrypt failed", pathName);
-        }
     }
 
+    //File encrypt
+    memset(&stFileHeaderInfo, 0, sizeof(FILE_HEADER_INFO_S));
+    if (fileEncrypt(dirFd, pathName, &stFileHeaderInfo) != 0) {
+        log_print(ANDROID_LOG_INFO, "inlinehook=====", "file : %s, encrypt failed", pathName);
+    }
+
+    //open old way
     int fd = old_openat(dirFd, pathName, flag, mode);
     log_print(ANDROID_LOG_INFO, "inlinehook====sss", "openat:%s, fd = %d", pathName, fd);
 
@@ -327,6 +396,7 @@ static int __nativehook_impl_android_openat(int dirFd, const char *pathName, int
         pstFileFdInfo->fd = fd;
         pstFileFdInfo->flag = flag;
         strcpy(pstFileFdInfo->szFilePath, pathName);
+        memcpy(&pstFileFdInfo->stFileHeaderInfo, &stFileHeaderInfo, sizeof(FILE_HEADER_INFO_S));
         g_FileFdMap.insert(std::pair<int, FILE_FD_INFO_S *>(fd, pstFileFdInfo));
 
 //return fd;
@@ -341,7 +411,7 @@ static int __nativehook_impl_android_openat(int dirFd, const char *pathName, int
                 return -1;
             }
 
-            addFileHeader(fd_c);
+            addFileHeader(fd_c, &pstFileFdInfo->stFileHeaderInfo);
             old_close(fd_c);
         }
 
@@ -396,7 +466,7 @@ static size_t findDecryptPoint(off_t curOffset, size_t *DecryptPoint) {
     return relativeOffset;
 }
 
-static int bufferEncrypt(int fd, const void *buf,size_t count, off_t offset)
+static int bufferEncrypt(int fd, const void *buf,size_t count, off_t offset, FILE_FD_INFO_S *pstFileFdInfo)
 {
     unsigned char *inBuf = (unsigned char *)buf;
     unsigned char *bufferTmp = NULL;
@@ -433,8 +503,8 @@ static int bufferEncrypt(int fd, const void *buf,size_t count, off_t offset)
     int ret;
     int readBufferLen;
     size_t hasEffectSize = 0;
-    char *pcSecretKey = g_stFileHeaderInfo.stSecretKeys.szSecretKey;
-    char *pcSecretIvec = g_stFileHeaderInfo.stSecretKeys.szSecretIvec;
+    char *pcSecretKey = pstFileFdInfo->stFileHeaderInfo.stSecretKeys.szSecretKey;
+    char *pcSecretIvec = pstFileFdInfo->stFileHeaderInfo.stSecretKeys.szSecretIvec;
     while (hasEffectSize < count) {
         readBufferLen = old_read(fd_r, cipherBuffer, BLOCK_SIZE);
         if (readBufferLen == -1) {
@@ -608,7 +678,7 @@ static int bufferEncrypt(int fd, const void *buf,size_t count, off_t offset)
     return hasEffectSize;
 }
 
-static int bufferDecrypt(int fd, void *buf, size_t count, off_t offset)
+static int bufferDecrypt(int fd, void *buf, size_t count, off_t offset, FILE_FD_INFO_S *pstFileFdInfo)
 {
     char *outBuf = (char *)buf;
     size_t relativeOffset;
@@ -641,7 +711,9 @@ static int bufferDecrypt(int fd, void *buf, size_t count, off_t offset)
         }
 
         if (readBufferLen == BLOCK_SIZE){
-            plaintBufferSize = fileSm4Decrypt(cipherBuffer, readBufferLen, plaintBuffer, g_stFileHeaderInfo.stSecretKeys.szSecretKey, g_stFileHeaderInfo.stSecretKeys.szSecretIvec);
+            plaintBufferSize = fileSm4Decrypt(cipherBuffer, readBufferLen, plaintBuffer,
+                                              pstFileFdInfo->stFileHeaderInfo.stSecretKeys.szSecretKey,
+                                              pstFileFdInfo->stFileHeaderInfo.stSecretKeys.szSecretIvec);
             if (relativeOffset != 0) {
                 if (hasEffectSize + (plaintBufferSize - relativeOffset) < count) {
                     memcpy(outBuf + hasEffectSize, plaintBuffer + relativeOffset, plaintBufferSize - relativeOffset);
@@ -714,13 +786,14 @@ static ssize_t __nativehook_impl_android_read(int fd, void *buf, size_t count) {
     ssize_t r_len;
     size_t curOffset = old_lseek(fd, 0, SEEK_CUR);
 
-    if (NULL != findFileFdInfo(fd)) {
+    FILE_FD_INFO_S *pstFileFdInfo = findFileFdInfo(fd);
+    if (NULL != pstFileFdInfo) {
         log_print(ANDROID_LOG_DEBUG, "\ninlinehook=====", "init , read: fd = %d, count = %d, curOffset = %d", fd, count, curOffset);
 
 
 //return old_read(fd, buf, count);
 
-        r_len = bufferDecrypt(fd, buf, count, -1);
+        r_len = bufferDecrypt(fd, buf, count, -1, pstFileFdInfo);
 
         if (r_len > 0) {
             log_print(ANDROID_LOG_DEBUG, "after==inlinehook=====", "read: buffer = %x, %x", ((char *) buf)[0], ((char *) buf)[1]);
@@ -737,10 +810,11 @@ static ssize_t __nativehook_impl_android_pread(int fd, void *buf, size_t count, 
 
     ssize_t r_len;
 
-    if (NULL != findFileFdInfo(fd)) {
+    FILE_FD_INFO_S *pstFileFdInfo = findFileFdInfo(fd);
+    if (NULL != pstFileFdInfo) {
         log_print(ANDROID_LOG_DEBUG, "inlinehook=====", "pread: fd = %d, count = %d, offset = %ld\n", fd, count, offset);
 
-        r_len = bufferDecrypt(fd, buf, count, offset + FS_HEADER_LEN);
+        r_len = bufferDecrypt(fd, buf, count, offset + FS_HEADER_LEN, pstFileFdInfo);
         if (r_len > 0) {
             log_print(ANDROID_LOG_DEBUG, "after==inlinehook=====", "pread: buffer = %x, %x\n",
                                 ((char *) buf)[0], ((char *) buf)[1]);
@@ -756,7 +830,7 @@ static ssize_t __nativehook_impl_android_pread(int fd, void *buf, size_t count, 
     return r_len;
 }
 
-static int appendOfOffset(int fd, size_t fileSize, size_t curOffset) {
+static int appendOfOffset(int fd, size_t fileSize, size_t curOffset, FILE_FD_INFO_S *pstFileFdInfo) {
     size_t wLen;
     size_t appendSize;
 
@@ -769,7 +843,7 @@ static int appendOfOffset(int fd, size_t fileSize, size_t curOffset) {
     memset(buf, 0, wLen);
 
     log_print(ANDROID_LOG_DEBUG, "inlinehook=====", "appendOfOffset, fd = %d, count = %d, curOffset = %d", fd, wLen, curOffset);
-    appendSize = bufferEncrypt(fd, buf, wLen, -1);
+    appendSize = bufferEncrypt(fd, buf, wLen, -1, pstFileFdInfo);
     log_print(ANDROID_LOG_DEBUG, "inlinehook=====", "appendOfOffset end, fd = %d, count = %d, curOffset = %d", fd, wLen, curOffset);
 
     return appendSize;
@@ -777,8 +851,8 @@ static int appendOfOffset(int fd, size_t fileSize, size_t curOffset) {
 
 static ssize_t __nativehook_impl_android_write(int fd, const void *buf, size_t count) {
     ssize_t r_len = 0;
-    FILE_FD_INFO_S *pstFileFdInfo = findFileFdInfo(fd);
 
+    FILE_FD_INFO_S *pstFileFdInfo = findFileFdInfo(fd);
     if (NULL != pstFileFdInfo) {
         struct stat statbuf;
         old_fstat(fd, &statbuf);
@@ -791,13 +865,13 @@ static ssize_t __nativehook_impl_android_write(int fd, const void *buf, size_t c
 //return r_len;
 
 
-        if ((pstFileFdInfo->flag & O_TRUNC != 0) && (old_lseek(fd, 0, SEEK_CUR) == FS_HEADER_LEN)) {
-            addFileHeader(fd);
+        if (((pstFileFdInfo->flag & O_TRUNC) != 0) && (old_lseek(fd, 0, SEEK_CUR) == FS_HEADER_LEN)) {
+            addFileHeader(fd, &pstFileFdInfo->stFileHeaderInfo);
         }
 
         log_print(ANDROID_LOG_DEBUG, "inlinehook=====", "write, bufferEncrypt: filepath = %s, fd = %d, count = %d, curFileSize = %lld, curOffset = %d",
                   pstFileFdInfo->szFilePath, fd, count, statbuf.st_size, old_lseek(fd, 0, SEEK_CUR));
-        r_len = bufferEncrypt(fd, buf, count, -1);
+        r_len = bufferEncrypt(fd, buf, count, -1, pstFileFdInfo);
         log_print(ANDROID_LOG_DEBUG, "inlinehook=====\n", "finish write: filepath = %s, fd = %d, count = %d, curFileSize = %lld, curOffset = %d, rLen = %d",
                   pstFileFdInfo->szFilePath, fd, count, statbuf.st_size, old_lseek(fd, 0, SEEK_CUR), r_len);
 
@@ -819,7 +893,7 @@ static ssize_t __nativehook_impl_android_pwrite(int fd, const void *buf, size_t 
 //return old_pwrite(fd, buf, count, offset);
 
         if ((pstFileFdInfo->flag & O_TRUNC != 0) && (old_lseek(fd, 0, SEEK_CUR) == FS_HEADER_LEN)) {
-            addFileHeader(fd);
+            addFileHeader(fd, &pstFileFdInfo->stFileHeaderInfo);
         }
 
 
@@ -829,12 +903,12 @@ static ssize_t __nativehook_impl_android_pwrite(int fd, const void *buf, size_t 
 
         size_t curOffset = old_lseek(fd, 0, SEEK_CUR);
         if (statbuf.st_size < curOffset) {
-            appendOfOffset(fd, statbuf.st_size, curOffset);
+            appendOfOffset(fd, statbuf.st_size, curOffset, pstFileFdInfo);
             log_print(ANDROID_LOG_DEBUG, "inlinehook=====", "failed, pwrite: filepath = %s, fd = %d, count = %d, offset = %d",
                       pstFileFdInfo->szFilePath, fd, count, offset);
         }
 
-        r_len = bufferEncrypt(fd, buf, count, offset + FS_HEADER_LEN);
+        r_len = bufferEncrypt(fd, buf, count, offset + FS_HEADER_LEN, pstFileFdInfo);
 
         return r_len;
     }
@@ -996,7 +1070,7 @@ static int __nativehook_impl_android_dprintf(int fd, const char *format, ...) {
     return ret;
 }
 
-static int ftruncateEncrypt(int fd, off_t length) {
+static int ftruncateEncrypt(int fd, off_t length, FILE_FD_INFO_S *pstFileFdInfo) {
     struct stat statbuf;
     size_t relativeLen = 0;
     int ret = 0;
@@ -1019,7 +1093,7 @@ static int ftruncateEncrypt(int fd, off_t length) {
             return -1;
         }
         memset(appendBuf, 0, relativeLen);
-        bufferEncrypt(fd, appendBuf, relativeLen, statbuf.st_size);
+        bufferEncrypt(fd, appendBuf, relativeLen, statbuf.st_size, pstFileFdInfo);
     } else {
         relativeLen = length + FS_HEADER_LEN;
 
@@ -1034,7 +1108,9 @@ static int ftruncateEncrypt(int fd, off_t length) {
             size_t fdCurWOffset = old_lseek(fd, decryptPoint, SEEK_SET);
             size_t readBufferLen = old_read(fd, cipherBuffer, BLOCK_SIZE);
             if (readBufferLen == BLOCK_SIZE) {
-                plaintBufferSize = fileSm4Decrypt(cipherBuffer, BLOCK_SIZE, plaintBuffer, g_stFileHeaderInfo.stSecretKeys.szSecretKey, g_stFileHeaderInfo.stSecretKeys.szSecretIvec);
+                plaintBufferSize = fileSm4Decrypt(cipherBuffer, BLOCK_SIZE, plaintBuffer,
+                                                  pstFileFdInfo->stFileHeaderInfo.stSecretKeys.szSecretKey,
+                                                  pstFileFdInfo->stFileHeaderInfo.stSecretKeys.szSecretIvec);
                 cipherBufferSize = fileXorEncrypt(plaintBuffer, relativeOffset, cipherBuffer);
 
                 old_pwrite(fd, cipherBuffer, cipherBufferSize, fdCurWOffset);
@@ -1074,7 +1150,7 @@ static int __nativehook_impl_android_ftruncate(int fd, off_t length) {
 //log_print(ANDROID_LOG_DEBUG, "inlinehook=====", "match ftruncate : fd = %d, length = %ld", fd, length);
 //return old_ftruncate(fd, length);
 
-        ret = ftruncateEncrypt(fd, length);
+        ret = ftruncateEncrypt(fd, length, pstFileFdInfo);
         if (ret == -1) {
             log_print(ANDROID_LOG_DEBUG, "inlinehook=====", "ftruncateEncrypt failed : fd = %d, length = %ld", fd, length + FS_HEADER_LEN);
         }
@@ -1091,18 +1167,6 @@ static int __nativehook_impl_android_rename(const char* __old_path, const char* 
     log_print(ANDROID_LOG_DEBUG, "inlinehook=====", "old_rename       __old_path : %s, __new_path = %s", __old_path, __new_path);
 
     return old_rename(__old_path, __new_path);
-}
-
-static void initGlobalInfo(void) {
-    memset(&g_stFileHeaderInfo, 0, sizeof(FILE_HEADER_INFO_S));
-    strcpy(g_stFileHeaderInfo.szFileHeaderTag, "FSH");
-    strcpy(g_stFileHeaderInfo.szSdkVersion, "1.0");
-    strcpy(g_stFileHeaderInfo.szVerifyUserKey, "88888888");
-
-    memset(g_stFileHeaderInfo.stSecretKeys.szSecretKey, 0x88, 16);
-    memset(g_stFileHeaderInfo.stSecretKeys.szSecretIvec, 0x99, 16);
-
-    return;
 }
 
 void startInlineHook(void) {
@@ -1254,6 +1318,4 @@ void startInlineHook(void) {
         inlineHook((uint32_t) ftruncate);
         log_print(ANDROID_LOG_INFO, "inlinehook", "inline hook ==ftruncate== end");
     }
-
-    initGlobalInfo();
 }
